@@ -105,12 +105,14 @@ The design deliberately avoids root as a hard requirement. It uses **Shizuku** �
 
 | Dependency | Purpose | Risk |
 |------------|---------|------|
-| `androidx.*`, material | UI | Low |
+| `androidx.*` (Compose BOM, **Material 3 Expressive**) | UI | Low |
 | `androidx.room` | Persistence of blocked set | Low |
-| `dev.rikka.shizuku:api` | Binder proxy to privileged shell | Requires Shizuku app installed + activated |
+| `dev.rikka.shizuku:api` / `:provider` (13.1.5) | Binder proxy to privileged shell | Requires Shizuku app installed + activated |
 | `org.jetbrains.kotlinx:kotlinx-coroutines-android` | Async | Low |
 
 No network, analytics, or crash SDKs are included — this app is intentionally offline-first.
+
+**Material 3 Expressive** (material3 1.5.0-beta01): the UI toolkit is Compose + Material 3 with the Expressive release. Expressive components are used where they add character, notably the shape-morphing [`LoadingIndicator`](https://developer.android.com/reference/kotlin/androidx/compose/material3/LoadingIndicator) during app scans (`@ExperimentalMaterial3ExpressiveApi`, opted in at the scan screen).
 
 ## 1.5 Runtime Boundaries
 
@@ -214,11 +216,14 @@ shizukuReady   : Boolean
 busyPackages   : Set<String>    // in-flight freeze/block
 error          : String?
 firewallOn     : Boolean
+isScanning     : Boolean        // true while a PackageManager scan is running
 ```
+
+Loading UX: first scan (no data yet) shows a centered **Material 3 Expressive `LoadingIndicator`** — the shape-morphing blob — with the caption "Scanning installed apps…". Re-scans show a thin progress bar above the list so it stays visible. Empty search/filter results show "No apps match."
 
 ## 2.4 UI Structure
 
-Single activity, single screen (Jetpack Compose + Material 3):
+Single activity, single screen (Jetpack Compose + **Material 3 Expressive**):
 
 ```text
 ┌───────────────────────────────────────────────┐
@@ -242,13 +247,24 @@ Each row has:
 - **Freeze switch** → invokes `ShizukuHelper.freeze/unfreeze` (disabled while the row is busy or Shizuku is not ready)
 - **Block switch** → updates DB + VPN
 
-Top bar shows total app count, firewall state, and Shizuku status with a **Grant** button. Errors surface via Snackbar.
+Top bar shows total app count, **frozen count** (`Frozen: N`, live from the scan state), firewall state, and Shizuku status with a **Grant** button. Errors surface via Snackbar.
 
 Below the header:
 
 - **Search field** (Material 3 outlined, single-line) — filters rows by app label or package name, case-insensitive, with a Clear affordance.
 - **Segmented tabs** (Material 3 `SingleChoiceSegmentedButtonRow`) — filter by origin: **All** / **Installed** (user apps) / **System**.
 - A "Showing X of Y apps" counter reflects the active filter.
+
+Rows are **clickable** and open a Material 3 `ModalBottomSheet` (**full-screen by default** — `skipPartiallyExpanded`, content fills available height) with three tabs:
+
+- **Details** — version, version code, min/target SDK, first install / last update times, frozen state, internet state, system/user origin.
+- **Processes** — **real-time** process list for the app's uid, polled every second through the privileged `ps -A -o PID,UID,NAME` via Shizuku while the sheet is open (cancelled on dismiss). `ActivityManager.getRunningAppProcesses()` cannot be used here since Android 10 restricts it to the caller's own package.
+- **Permissions** — every requested permission with its runtime grant state (`GRANTED`/`DENIED`), plus an "N of M granted" summary.
+- **Usage** — **Internet usage** (live): per-uid cumulative received / sent / total bytes since boot plus the current down/up rate, sampled every second from `TrafficStats.getUidRxBytes/getUidTxBytes` while the tab is visible. Counters reset at reboot; frozen or internet-blocked apps show no traffic.
+- **Actions** — operations on the app:
+  - **Launch app** — starts its launcher intent if the app has an entry point (hidden otherwise).
+  - **Force stop (Shizuku)** — `am force-stop <pkg>`, enabled only when Shizuku is granted.
+  - **Uninstall** — user apps: opens the system uninstall dialog (`ACTION_DELETE`). System apps: confirmation dialog, then `pm uninstall --user 0 <pkg>` via Shizuku (removes for user 0 only; other users unaffected).
 
 ## 2.5 Permission Model
 
@@ -268,6 +284,7 @@ Below the header:
 | Malicious app uses our Shizuku grant to hide itself | Our code only issues `pm enable/disable` and `am force-stop`; no arbitrary command injection from UI. Shell strings are built from validated `packageName` values (`[a-zA-Z0-9._]`). |
 | Attacker crafts an intent to start our VPN with arbitrary blocklist | `FirewallVpnService` is `exported="false"`. Only our app can start/update it. |
 | User accidentally freezes a critical system app (e.g., SystemUI) | UI should grey-out / warn on system packages (`isSystem == true`) — planned feature, flagged as a follow-up. |
+| User removes a critical system app via the **Actions** tab | Removing a system app first shows a confirmation dialog explaining `pm uninstall --user 0` scope and its risk; nothing runs without an explicit user tap. User-app uninstalls always go through the signed system uninstaller dialog. |
 | Shizuku dies mid-operation | `ShizukuHelper.exec` returns `Result.failure`; ViewModel surfaces error and refreshes. Freeze may or may not have applied — refresh reconciles. |
 | VPN silently drops | Notification stays visible; user can toggle off from notification (planned) or reopen the app. |
 
@@ -337,7 +354,7 @@ VM.refresh()   ← re-scan; isFrozen recomputed from PM
 
 **Why re-scan instead of optimistic update?** A freeze can silently fail on vendor ROMs (e.g., some packages are protected). Always derive state from `PackageManager`.
 
-**Optional pre-step:** `am force-stop <pkg>` before disabling, to kill any running instance whose notifications may already be queued. Exposed as `ShizukuHelper.forceStop` but not auto-invoked — user may want a clean "disable while running" for testing.
+**Optional pre-step:** `am force-stop <pkg>` before disabling, to kill any running instance whose notifications may already be queued. Exposed as `ShizukuHelper.forceStop` and surfaced as a button in the **Actions** tab of the details sheet — user-invoked, not auto-invoked.
 
 ## 3.3 Internet Block Flow (VPN)
 
