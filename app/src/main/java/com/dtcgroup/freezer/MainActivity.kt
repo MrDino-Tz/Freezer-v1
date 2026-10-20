@@ -32,11 +32,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Switch
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -44,7 +51,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -158,6 +167,24 @@ fun AppScreenContent(
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Local UI filter state (search + type tab)
+    var query by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf(AppFilter.ALL) }
+
+    val filteredApps = remember(state.apps, query, filter) {
+        state.apps.filter { app ->
+            val matchesType = when (filter) {
+                AppFilter.ALL -> true
+                AppFilter.INSTALLED -> !app.isSystem
+                AppFilter.SYSTEM -> app.isSystem
+            }
+            val matchesQuery = query.isBlank() ||
+                app.label.contains(query, ignoreCase = true) ||
+                app.packageName.contains(query, ignoreCase = true)
+            matchesType && matchesQuery
+        }
+    }
+
     LaunchedEffect(state.error) {
         state.error?.let { message ->
             snackbarHostState.showSnackbar(message)
@@ -181,8 +208,22 @@ fun AppScreenContent(
             )
             HorizontalDivider()
 
+            SearchAndFilter(
+                query = query,
+                onQueryChange = { query = it },
+                selected = filter,
+                onSelect = { filter = it },
+            )
+
+            Text(
+                text = "Showing ${filteredApps.size} of ${state.apps.size} apps",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
+
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(state.apps, key = { it.packageName }) { app ->
+                items(filteredApps, key = { it.uid to it.packageName }) { app ->
                     AppRow(
                         app = app,
                         busy = app.packageName in state.busyPackages,
@@ -346,6 +387,56 @@ private fun SmallBadge(text: String) {
 }
 
 // ---- Previews ----------------------------------------------------------------
+
+/** Tabs that filter the list by app origin. */
+private enum class AppFilter(val label: String) {
+    ALL("All"),
+    INSTALLED("Installed"),
+    SYSTEM("System"),
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SearchAndFilter(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    selected: AppFilter,
+    onSelect: (AppFilter) -> Unit,
+) {
+    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("Search apps…") },
+            singleLine = true,
+            shape = MaterialTheme.shapes.large,
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    TextButton(onClick = { onQueryChange("") }) {
+                        Text("Clear")
+                    }
+                }
+            },
+        )
+        Spacer(Modifier.height(8.dp))
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            AppFilter.entries.forEachIndexed { index, filterOption ->
+                SegmentedButton(
+                    selected = selected == filterOption,
+                    onClick = { onSelect(filterOption) },
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = index,
+                        count = AppFilter.entries.size,
+                    ),
+                ) {
+                    Text(filterOption.label)
+                }
+            }
+        }
+    }
+}
+
 
 private fun demoApps(): List<AppInfo> = listOf(
     AppInfo(

@@ -244,6 +244,12 @@ Each row has:
 
 Top bar shows total app count, firewall state, and Shizuku status with a **Grant** button. Errors surface via Snackbar.
 
+Below the header:
+
+- **Search field** (Material 3 outlined, single-line) — filters rows by app label or package name, case-insensitive, with a Clear affordance.
+- **Segmented tabs** (Material 3 `SingleChoiceSegmentedButtonRow`) — filter by origin: **All** / **Installed** (user apps) / **System**.
+- A "Showing X of Y apps" counter reflects the active filter.
+
 ## 2.5 Permission Model
 
 | Permission | Why | How granted |
