@@ -10,3 +10,20 @@
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
+
+# Shizuku instantiates our privileged UserService below from the main app code;
+# its constructor + methods are discovered reflectively by the Shizuku server
+# and must not be renamed or stripped anywhere, including in R8-optimized subpackages.
+-if class com.dtcgroup.freezer.core.PmUserService
+-keep class com.dtcgroup.freezer.core.PmUserService {
+    <init>();
+    private void <init>(...);
+    public *;
+}
+
+# AIDL stub classes referenced over a Binder boundary
+-keep class com.dtcgroup.freezer.shizuku.IPmService { *; }
+-keep class com.dtcgroup.freezer.shizuku.IPmService$* { *; }
+
+# Shizuku provider wiring
+-keep class rikka.shizuku.** { *; }

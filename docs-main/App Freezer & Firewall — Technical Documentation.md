@@ -3,10 +3,10 @@
 | | |
 |---|---|
 | **Version** | 1.0 |
-| **Platform** | Android (min SDK 26, target SDK 34) |
+| **Platform** | Android (min SDK 29, target SDK 37) |
 | **Distribution** | Sideloaded APK (not Play Store / App Store) |
 | **Author** | (your name) |
-| **Last updated** | (date) |
+| **Last updated** | 2026-10-20 |
 
 ## Table of Contents
 
@@ -69,32 +69,31 @@ The design deliberately avoids root as a hard requirement. It uses **Shizuku** �
              │ binds                             │ binds
              ▼                                   ▼
 ┌────────────────────────┐          ┌──────────────────────────────┐
-│  AppControlViewModel   │          │       AppAdapter             │
-│  (orchestration, state)│◄────────►│  (RecyclerView rows)         │
+│  AppControlViewModel   │          │  Compose UI (LazyColumn)     │
+│  (orchestration, state)│◄────────►│  StatusHeader + AppRow       │
 └─────┬───────┬───────┬──┘          └──────────────────────────────┘
       │       │       │
       │       │       └──────────────► AppDatabase (Room)
       │       │                        └── BlockedAppEntity
       │       │
       │       └──────────────────────► FirewallVpnService
-      │                                 (VpnService, foreground)
+      │                                 (VpnService, foreground, specialUse)
       │
       └──────────────────────────────► AppScanner
                                        └── PackageManager
                                       ShizukuHelper
-                                       └── Shizuku Binder
-                                            └── pm / am shell
+                                       └── PmUserService (bindUserService)
+                                            └── pm / am shell (uid 2000 or root)
 ```
 
 ## 1.3 Layer Responsibilities
 
 | Layer | Package | Responsibility |
 |-------|---------|----------------|
-| UI | `com.yourapp.freezer` (Activity, Adapter) | Render list, capture taps, launch permission intents |
+| UI | `com.dtcgroup.freezer` (MainActivity, Compose) | Render list (`LazyColumn`), capture taps, launch permission intents |
 | ViewModel | `ui.AppControlViewModel` | Single source of truth; orchestrates scanner, DB, Shizuku, VPN |
-| Domain / Core | `core.AppScanner`, `core.ShizukuHelper`, `core.FirewallVpnService` | Platform integrations and privileged ops |
+| Domain / Core | `core.AppScanner`, `core.ShizukuHelper`, `core.PmUserService`, `core.FirewallVpnService` | Platform integrations and privileged ops |
 | Data | `data.*` | Room entities, DAOs, DB; in-memory DTOs (`AppInfo`) |
-| Util | `util.*` | Small shared helpers (extensions) |
 
 **Rules:**
 
@@ -155,10 +154,10 @@ No network, analytics, or crash SDKs are included — this app is intentionally 
   - Root with `su` — too intrusive for many users; breaks banking apps.
   - Device Owner / DPM provisioning — requires factory reset or ADB provisioning, only viable for enterprise.
 
-### ADR-002: Use `pm disable-user` CLI instead of `PackageManager.setApplicationEnabledSetting()`
+### ADR-002: Use `pm disable-user` CLI via a bound Shizuku user service
 
-- **Context:** `setApplicationEnabledSetting()` is the canonical API but is a hidden method; calling it requires either reflection on `IPackageManager` AIDL stubs or compiling against hidden SDK — fragile and version-dependent.
-- **Decision:** Execute `pm disable-user --user 0 <pkg>` / `pm enable <pkg>` through Shizuku shell. Semantically equivalent for the user, resilient across Android versions, and simpler to maintain.
+- **Context:** `setApplicationEnabledSetting()` is the canonical API but is a hidden method; calling it requires either reflection on `IPackageManager` AIDL stubs or compiling against hidden SDK — fragile and version-dependent. Also, `Shizuku.newProcess` is private as of Shizuku API 13.x, so shell exec must go through `bindUserService`.
+- **Decision:** Execute `pm disable-user --user 0 <pkg>` / `pm enable <pkg>` through a privileged [IPmService](#22-key-design-decisions-adr) bound with `Shizuku.bindUserService()`. The service runs inside the Shizuku server (uid 2000 shell / root) and exposes `exec()` + `lastExitCode()`. Semantically equivalent for the user, resilient across Android versions, and simpler to maintain.
 
 ### ADR-003: VPN tunnel with allow-list bypass rather than `iptables` DROP
 
@@ -219,7 +218,7 @@ firewallOn     : Boolean
 
 ## 2.4 UI Structure
 
-Single activity, single screen:
+Single activity, single screen (Jetpack Compose + Material 3):
 
 ```text
 ┌───────────────────────────────────────────────┐
@@ -239,11 +238,11 @@ Single activity, single screen:
 
 Each row has:
 
-- Icon, label, package name, uid
-- **Freeze switch** → invokes `ShizukuHelper.freeze/unfreeze`
+- Icon (`AndroidView`-backed `ImageView`), label, package name, uid, badges (`FROZEN` / `BLOCKED` / `SYSTEM`)
+- **Freeze switch** → invokes `ShizukuHelper.freeze/unfreeze` (disabled while the row is busy or Shizuku is not ready)
 - **Block switch** → updates DB + VPN
 
-Top bar shows total app count and Shizuku status with a **Grant** button.
+Top bar shows total app count, firewall state, and Shizuku status with a **Grant** button. Errors surface via Snackbar.
 
 ## 2.5 Permission Model
 
@@ -296,7 +295,7 @@ Top bar shows total app count and Shizuku status with a **Grant** button.
 [VM] emit UiState(apps, totalApps, shizukuReady, ...)
     │
     ▼
-[UI] adapter.submitList(apps)
+[UI] LazyColumn recomposes from UiState
 ```
 
 - **Complexity:** O(n) over installed packages; n typically < 400, sub-100 ms on modern devices.
@@ -318,10 +317,10 @@ ViewModel.toggleFreeze(app)
 ShizukuHelper.freeze(pkg)  or  unfreeze(pkg)
     │
     ▼
-Shizuku.newProcess(["sh", "-c", "pm disable-user --user 0 <pkg>"])
+PmUserService.exec("pm disable-user --user 0 <pkg>")     ← bound with Shizuku.bindUserService()
     │
-    ├─ stdout ok + exit 0  → Success
-    └─ non-zero            → Failure(reason)
+    ├─ exit code 0        → Success (stdout rendered)
+    └─ non-zero            → Failure(stderr + exit code)
     │
     ▼
 VM: clear busy, set error if failure
@@ -400,9 +399,8 @@ builder = VpnService.Builder()
 
 for each installed app:
     if app.packageName ∉ blocked:
-        builder.addDisallowedApplication(app.packageName)   ← bypass VPN
-
-builder.addDisallowedApplication(ourOwnPackage)             ← never block ourselves
+        builder.addDisallowedApplication(app.packageName)   ← bypass VPN (API 29+)
+                                                            (own package always bypasses)
 
 vpnInterface = builder.establish()
 if vpnInterface == null: log + abort
@@ -502,10 +500,11 @@ STOPPED ──start()──► RUNNING
 
 | Android version | Notes |
 |-----------------|-------|
-| 8.0 (API 26) | Minimum supported; foreground service required |
-| 10 (API 29) | Scoped storage irrelevant (we don't read external storage) |
+| 9.0 (API 29) | **Minimum supported** — `addDisallowedApplication(String)` requires API 29; foreground service required |
+| 10 (API 30) | Scoped storage irrelevant (we don't read external storage) |
 | 11 (API 30) | `QUERY_ALL_PACKAGES` required; auto-granted on sideload |
 | 13 (API 33) | `POST_NOTIFICATIONS` runtime permission required |
 | 14 (API 34) | `FOREGROUND_SERVICE_SPECIAL_USE` type required for VPN |
+| 15/16 (API 35/37) | Current build: target SDK 37, AGP 9 built-in Kotlin, Room via KSP 2.3.12 |
 
 *End of documentation.*
